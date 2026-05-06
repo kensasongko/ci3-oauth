@@ -22,7 +22,6 @@ $config['azure'] = [
     'redirectUri'           => 'http://localhost/codeigniter3/index.php/auth/azure/callback',
     'postLogoutRedirectUri' => 'http://localhost/codeigniter3/index.php/login',
     'scopes'                => ['openid', 'profile', 'email', 'offline_access'],
-    'endpointVersion'       => 2.0,
     'allowLocalLogin'       => TRUE,
     'allowedTenants'        => [],
     'jitProvision'          => TRUE,

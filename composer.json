@@ -1,7 +1,7 @@
 {
     "name": "local/codeigniter3-app",
     "require": {
-        "thenetworg/oauth2-azure": "^2.2"
+        "jumbojett/openid-connect-php": "^1.0"
     },
     "authors": [
         {

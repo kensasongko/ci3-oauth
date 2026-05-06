@@ -25,21 +25,18 @@ class Auth_azure extends CI_Controller {
         }
 
         try {
-            $url = $this->azure_auth->get_authorization_url();
+            // jumbojett's authenticate() builds the URL, stores state+nonce,
+            // redirects, and exit()s — never returns on the happy path.
+            $this->azure_auth->start_login();
         } catch (Exception $e) {
             log_message('error', 'Azure SSO start failed: ' . $e->getMessage());
             $this->session->set_flashdata('sso_error', 'Single sign-on is not available right now.');
             redirect('login');
             return;
         }
-
-        redirect($url);
     }
 
     public function callback() {
-        $code  = $this->input->get('code',  TRUE);
-        $state = $this->input->get('state', TRUE);
-
         // Surface Entra-side errors (consent denied, etc.) before we try to
         // exchange a code that isn't there.
         $err = $this->input->get('error', TRUE);
@@ -52,7 +49,8 @@ class Auth_azure extends CI_Controller {
         }
 
         try {
-            $claims = $this->azure_auth->handle_callback($code, $state);
+            // jumbojett reads ?code and ?state from $_GET itself; no args.
+            $claims = $this->azure_auth->handle_callback();
         } catch (Exception $e) {
             log_message('error', 'Azure SSO callback failed: ' . $e->getMessage());
             $this->session->set_flashdata('sso_error', 'Sign-in failed. Please try again.');

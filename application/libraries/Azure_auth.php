@@ -1,33 +1,33 @@
 <?php
 defined('BASEPATH') OR exit('No direct script access allowed');
 
-use TheNetworg\OAuth2\Client\Provider\Azure as AzureProvider;
+use Jumbojett\OpenIDConnectClient;
+use Jumbojett\OpenIDConnectClientException;
 
 /**
- * Wraps TheNetworg/oauth2-azure for the OpenID Connect Authorization Code flow
- * against Microsoft Entra ID (v2.0 endpoint).
+ * Wraps jumbojett/openid-connect-php for the OpenID Connect Authorization Code
+ * flow against Microsoft Entra ID (v2.0 endpoint).
  *
  * Loaded with: $this->load->library('azure_auth');
+ *
+ * Public API:
+ *   start_login()        — redirects browser to Entra; never returns
+ *   handle_callback()    — validates the redirect-back, returns normalized claims
+ *   build_logout_url()   — returns RP-initiated logout URL
  */
 class Azure_auth {
-
-    const SESSION_STATE_KEY = 'azure_oauth_state';
-    const SESSION_NONCE_KEY = 'azure_oauth_nonce';
 
     /** @var array */
     protected $cfg;
 
-    /** @var AzureProvider */
-    protected $provider;
+    /** @var OpenIDConnectClient */
+    protected $oidc;
 
     /** @var CI_Controller */
     protected $CI;
 
     public function __construct() {
         $this->CI =& get_instance();
-        // CI3 auto-merges application/config/<ENVIRONMENT>/Azure.php on top of
-        // the default file when both exist. The third argument suppresses the
-        // exception if the library is loaded twice in one request.
         $this->CI->config->load('Azure', FALSE, TRUE);
         $loaded = $this->CI->config->item('azure');
         $this->cfg = is_array($loaded) ? $loaded : [];
@@ -39,77 +39,63 @@ class Azure_auth {
             throw new RuntimeException('Azure SSO is not configured: redirectUri is required and must match the Entra app registration.');
         }
 
-        $this->provider = new AzureProvider([
-            'clientId'                => $this->cfg['clientId'],
-            'clientSecret'            => $this->cfg['clientSecret'],
-            'redirectUri'             => $this->cfg['redirectUri'],
-            'tenant'                  => $this->cfg['tenantId'],
-            'defaultEndPointVersion'  => AzureProvider::ENDPOINT_VERSION_2_0,
-            'scopes'                  => isset($this->cfg['scopes']) && is_array($this->cfg['scopes'])
-                                            ? $this->cfg['scopes']
-                                            : ['openid', 'profile', 'email', 'offline_access'],
-        ]);
+        // jumbojett uses native $_SESSION for state/nonce. CI3's session library
+        // does not touch $_SESSION, so we have to start one ourselves.
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
+        }
+
+        // Microsoft v2.0 issuer — jumbojett auto-discovers endpoints from
+        // <issuer>/.well-known/openid-configuration.
+        $providerUrl = 'https://login.microsoftonline.com/' . $this->cfg['tenantId'] . '/v2.0';
+
+        $this->oidc = new OpenIDConnectClient(
+            $providerUrl,
+            $this->cfg['clientId'],
+            $this->cfg['clientSecret']
+        );
+        $this->oidc->setRedirectURL($this->cfg['redirectUri']);
+
+        $scopes = isset($this->cfg['scopes']) && is_array($this->cfg['scopes'])
+            ? $this->cfg['scopes']
+            : ['openid', 'profile', 'email', 'offline_access'];
+        $this->oidc->addScope($scopes);
     }
 
     /**
-     * Build the authorization URL, generate fresh state + nonce, store both
-     * in the session for verification on callback, return the URL.
+     * Build the auth URL, generate state + nonce, redirect — and exit.
+     * jumbojett's authenticate() handles the entire kickoff including the
+     * header() + exit(), so this method does not return on the happy path.
      */
-    public function get_authorization_url() {
-        $nonce = bin2hex(random_bytes(16));
-
-        $authUrl = $this->provider->getAuthorizationUrl([
-            'scope' => $this->provider->scope,
-            'nonce' => $nonce,
-        ]);
-
-        $this->CI->session->set_userdata([
-            self::SESSION_STATE_KEY => $this->provider->getState(),
-            self::SESSION_NONCE_KEY => $nonce,
-        ]);
-
-        return $authUrl;
+    public function start_login() {
+        try {
+            $this->oidc->authenticate();
+        } catch (OpenIDConnectClientException $e) {
+            throw new RuntimeException('OIDC authorize failed: ' . $e->getMessage(), 0, $e);
+        }
     }
 
     /**
-     * Verify state, exchange code for tokens, validate ID token claims,
-     * return a normalized claims array. Throws on any failure.
+     * Process the callback. authenticate() reads ?code & ?state from $_GET,
+     * exchanges the code, validates state/nonce/signature/iss/aud/exp.
+     * We additionally enforce Microsoft's `tid` claim against tenantId or the
+     * allowedTenants whitelist.
      *
-     * @param string $code  The `code` query param from the callback.
-     * @param string $state The `state` query param from the callback.
      * @return array{oid:string,tid:string,email:?string,name:?string,preferred_username:?string,upn:?string}
      */
-    public function handle_callback($code, $state) {
-        $expectedState = $this->CI->session->userdata(self::SESSION_STATE_KEY);
-        $expectedNonce = $this->CI->session->userdata(self::SESSION_NONCE_KEY);
-
-        $this->CI->session->unset_userdata(self::SESSION_STATE_KEY);
-        $this->CI->session->unset_userdata(self::SESSION_NONCE_KEY);
-
-        if (empty($code)) {
-            throw new RuntimeException('Missing authorization code on callback.');
-        }
-        if (empty($state) || empty($expectedState) || !hash_equals((string) $expectedState, (string) $state)) {
-            throw new RuntimeException('OAuth state mismatch — possible CSRF.');
+    public function handle_callback() {
+        try {
+            $this->oidc->authenticate();
+        } catch (OpenIDConnectClientException $e) {
+            throw new RuntimeException('OIDC callback failed: ' . $e->getMessage(), 0, $e);
         }
 
-        $token = $this->provider->getAccessToken('authorization_code', ['code' => $code]);
+        $verified = $this->oidc->getVerifiedClaims();
+        $claims   = is_object($verified) ? (array) $verified : (array) $verified;
 
-        $claims = $token->getIdTokenClaims();
-        if (!is_array($claims) || empty($claims)) {
-            throw new RuntimeException('ID token claims missing from token response.');
-        }
-
-        if (!isset($claims['aud']) || $claims['aud'] !== $this->cfg['clientId']) {
-            throw new RuntimeException('ID token audience does not match clientId.');
-        }
-        if (!isset($claims['nonce']) || !hash_equals((string) $expectedNonce, (string) $claims['nonce'])) {
-            throw new RuntimeException('ID token nonce mismatch — possible replay.');
-        }
-        if (!isset($claims['tid']) || empty($claims['tid'])) {
+        if (empty($claims['tid'])) {
             throw new RuntimeException('ID token missing tid (tenant id) claim.');
         }
-
         $allowed = isset($this->cfg['allowedTenants']) && is_array($this->cfg['allowedTenants'])
             ? $this->cfg['allowedTenants']
             : [];
@@ -122,29 +108,45 @@ class Azure_auth {
                 throw new RuntimeException('ID token tenant does not match configured tenantId.');
             }
         }
-
         if (empty($claims['oid'])) {
             throw new RuntimeException('ID token missing oid (object id) claim.');
+        }
+
+        // Stash the id_token so we can pass it as id_token_hint at logout.
+        $idToken = $this->oidc->getIdToken();
+        if ($idToken) {
+            $this->CI->session->set_userdata('azure_id_token', $idToken);
         }
 
         return [
             'oid'                => $claims['oid'],
             'tid'                => $claims['tid'],
-            'email'              => $claims['email'] ?? NULL,
-            'name'               => $claims['name'] ?? NULL,
+            'email'              => $claims['email']              ?? NULL,
+            'name'               => $claims['name']               ?? NULL,
             'preferred_username' => $claims['preferred_username'] ?? NULL,
-            'upn'                => $claims['upn'] ?? NULL,
+            'upn'                => $claims['upn']                ?? NULL,
         ];
     }
 
     /**
-     * Build the federated logout URL — sends the user to Microsoft to sign out
-     * of Entra, then back to postLogoutRedirectUri.
+     * Build the federated logout URL. Microsoft's v2.0 logout endpoint accepts
+     * post_logout_redirect_uri and (optionally) id_token_hint.
      */
     public function build_logout_url() {
         $postLogout = !empty($this->cfg['postLogoutRedirectUri'])
             ? $this->cfg['postLogoutRedirectUri']
             : '';
-        return $this->provider->getLogoutUrl($postLogout);
+        $idToken = $this->CI->session->userdata('azure_id_token');
+
+        $params = [];
+        if ($postLogout !== '') {
+            $params['post_logout_redirect_uri'] = $postLogout;
+        }
+        if (!empty($idToken)) {
+            $params['id_token_hint'] = $idToken;
+        }
+
+        $url = 'https://login.microsoftonline.com/' . $this->cfg['tenantId'] . '/oauth2/v2.0/logout';
+        return $params ? $url . '?' . http_build_query($params) : $url;
     }
 }
