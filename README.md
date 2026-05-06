@@ -449,4 +449,3 @@ first when a callback fails silently.
 - [jumbojett/openid-connect-php on GitHub](https://github.com/jumbojett/OpenID-Connect-PHP)
 - [CodeIgniter 3 user guide — Composer integration](https://codeigniter.com/userguide3/general/managing_apps.html#composer-support)
 - [CodeIgniter 3 user guide — Sessions](https://codeigniter.com/userguide3/libraries/sessions.html)
-- `SSO_ENTRA_ID_PLAN_CI3.md` in this repo — original implementation plan and rationale.
